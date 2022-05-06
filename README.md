@@ -1,9 +1,14 @@
 # hp-controller-RPC-56P
-Get data from heat pump controller via RS-485
+
+This can be used for Timel's heat pump controllers: RPC-56P & RPC-100 readout. RPC-56P was, and RPC-100 is used by Eko Dom heat pumps polish producer.
+
+This software only listens data from heat pump controller via RS-485. It does not write anything to the controller.
 
 First stage was Delphi program for PC working with RS-485 to USB converter. It worked well, having display chart, save & load XML capabilities.
 Since this kind of aquisition was problematic from logistics point of view - it was dropped.
 
 Second stage is esp32 microcontroller based approach. Aim was to store atleast 48h of data.
 
-Third stage will be data upload to some external (IoT) server.
+Third stage was esp8266 (esp12) port
+
+Last stage is translate all this thing to ESPHome (and Home Assistant)

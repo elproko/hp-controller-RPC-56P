@@ -1,17 +1,32 @@
-#include <WiFi.h>
-#include <WebServer.h>
-#include <ESPmDNS.h>
-#include <Update.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <ESP8266mDNS.h>
+//#include <Update.h>
+#include <ESP8266HTTPUpdateServer.h>
 #include "time.h"
+#include <NTPClient.h>
 
 // Please set proper WIFI settings first !
 #include "wifi_settings.h"
+
+
+const String WERSJA = "Pompka w Zielistkach v0.62";
+
+IPAddress local_IP(192, 168, 1, 45);//45
+IPAddress gateway(192, 168, 1, 3);
+
+IPAddress subnet(255, 255, 255, 0);
+IPAddress primaryDNS(192, 168, 1, 3);   //optional
+IPAddress secondaryDNS(8, 8, 4, 4); //optional
 
 //needed for SNTP & MQTT
 static const char* ntpServer = "pool.ntp.org";
 static const long  gmtOffset_sec = 3600;
 static const int   daylightOffset_sec = 3600;
+static const unsigned  ntp_update_interval_msec = 84600000;//1day
 
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, ntpServer, daylightOffset_sec,ntp_update_interval_msec);
 
 /*String containing Hostname, Device Id & Device Key in the format:                         */
 /*  "HostName=<host_name>;DeviceId=<device_id>;SharedAccessKey=<device_key>"                */
@@ -20,7 +35,7 @@ static const int   daylightOffset_sec = 3600;
 
 static bool hasIoTHub = false;
 
-#include "Esp32MQTTClient.h"
+//#include "Esp8266MQTTClient.h"
 
 // Warning:
 // C:\Users\<user>\AppData\Local\Arduino15\packages\esp32\hardware\esp32\1.0.4\libraries\AzureIoT\src\az_iot\c-utility\pal\lwip\sntp_lwip.c 
@@ -28,8 +43,14 @@ static bool hasIoTHub = false;
 // https://github.com/VSChina/ESP32_AzureIoT_Arduino/issues/18
 
 
+#define UPDATE_SIZE_UNKNOWN 0XFFFFFFFF
 
-#define LED_PWR 22
+//esp32
+//#define LED_PWR 22
+// esp12
+#define LED_PWR 16
+
+#define DIR_PIN 4
 
 #define LED_PIN1 17
 #define LED_PIN2 18
@@ -41,7 +62,8 @@ static bool hasIoTHub = false;
 //#define LED_PIN2 15
 
 
-#define  MAXTAB 701
+// CRITICAL for ESP8266 - cannot be more due to heap corruption
+#define  MAXTAB 301
 
 
 #define INOUT_INTERVAL 600
@@ -65,25 +87,8 @@ struct HPmeasure{
   byte year;
 };
 
-struct HPstateRecord{     //alarms & relays
-  byte state;
-  byte h;
-  byte m;
-  byte s;
-  byte day;
-  byte month;
-  byte year;
-};
 
 unsigned long tdiff=0;
-
-
-IPAddress local_IP(192, 168, 1, 45);
-IPAddress gateway(192, 168, 1, 3);
-
-IPAddress subnet(255, 255, 255, 0);
-IPAddress primaryDNS(192, 168, 1, 3);   //optional
-IPAddress secondaryDNS(8, 8, 4, 4); //optional
 
 String curTime;
 
@@ -120,16 +125,16 @@ HPmeasure hpmCurrentOUT;
 HPmeasure hpmCurrentTOP;
 HPmeasure hpmCurrentBOTTOM;
 HPmeasure hpmCurrentWATER;
-HPstateRecord hpmCurrentALM;
-HPstateRecord hpmCurrentREL;
+HPmeasure hpmCurrentALM;
+HPmeasure hpmCurrentREL;
 
  HPmeasure      BOTTOMmeasures[MAXTAB]; //bottom source
  HPmeasure      TOPmeasures[MAXTAB];    //top source
  HPmeasure      OUTmeasures[MAXTAB];    //outside temp
  HPmeasure      ROOMmeasures[MAXTAB];   //inside/room
  HPmeasure      WATERmeasures[MAXTAB];  // user's hot water
- HPstateRecord RELlist[MAXTAB];        //relays states list
- HPstateRecord ALMlist[MAXTAB];        //alarms states list
+ HPmeasure      RELlist[MAXTAB];        //relays states list
+ HPmeasure      ALMlist[MAXTAB];        //alarms states list
 
  int wrptrBOTTOM=0;
  int wrptrTOP=0;
@@ -149,10 +154,9 @@ String tmp;
 //globalne do przechowywania czasu
 struct tm TT;
 
-WebServer server(80);
+ESP8266WebServer server(80);
 
 
-const String WERSJA = "Pompka w Zielistkach v0.591";
 
 const String JSINCLUDE =
 "\n  <!-- Plotly.js -->"
@@ -165,27 +169,55 @@ const String JSINCLUDE =
     "}"
 "</script>";
 
-void printLocalTime()
-{
-//  struct tm timeinfo;
-  if(!getLocalTime(&TT)){
-    Serial.println("Failed to obtain time");
-    return;
-  }
-  Serial.println(&TT, "%A, %B %d %Y %H:%M:%S");
-}
-
 String getTm(byte co){
   String wy=String(co);
   if (wy.length()<2)  wy="0"+wy; 
   return(wy);
 }
 
+void ntp_to_rtc(unsigned t, tm &TT)                   //
+{                                                       //
+   // t -= (2208988800UL);                                // Convert to common time_t epoch (Jan 1 1970)
+   // t += (-5L * 60 * 60);                               // Adjust for time zone
+                                                        //
+                                                        // - Convert seconds to year, day of year, day of week, hours, minutes, seconds
+    ldiv_t d = ldiv(t, 60);                             // Seconds
+    TT.tm_sec = d.rem;                           //
+    d = ldiv(d.quot, 60);                               // Minutes
+    TT.tm_min = d.rem;                           //
+    d = ldiv(d.quot, 24);                               // Hours
+    TT.tm_hour = d.rem;                          //
+    //rtc.dow = ((d.quot + 4) % 7) + 1;                   // Day of week
+    d = ldiv(d.quot, 365);                              // Day of year
+    int doy = d.rem;                                    //
+    unsigned yr = d.quot + 1970;                        // Year
+                                                        //
+                                                        // - Adjust day of year for leap years
+    unsigned ly;                                        // Leap year
+    for(ly = 1972; ly < yr; ly += 4) {                  // Adjust year and day of year for leap years
+        if(!(ly % 100) && (ly % 400)) continue;         // Skip years that are divisible by 100 and not by 400
+        --doy;                                          //
+    }                                                   //
+    if(doy < 0) doy += 365, ++yr;                       // Handle day of year underflow
+    TT.tm_year = yr - 1900;                      //
+                                                        //
+                                                        // - Find month and day of month from day of year
+    static uint8_t const dm[2][12] = {                  // Days in each month
+        { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}, // Not a leap year
+        { 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}  // Leap year
+    };                                                  //
+    int day = doy;                                      // Init day of month
+    TT.tm_mon = 0;                                      // Init month
+    ly = (yr == ly) ? 1 : 0;                            // Make leap year index 0 = not a leap year, 1 = is a leap year
+    while(day > dm[ly][TT.tm_mon]) day -= dm[ly][TT.tm_mon++]; // Calculate month and day of month                                                        
+    TT.tm_mday = ++day;                        
+} 
+
 String getStrLocalTime()
 {
-  if(!getLocalTime(&TT)){
-    return("Failed to obtain time"); 
-  }
+
+
+ntp_to_rtc(timeClient.getEpochTime(),TT);
 
 int _hour = TT.tm_hour;
 int _min  = TT.tm_min;
@@ -199,65 +231,66 @@ int _year = TT.tm_year + 1900;
  
 }
 
+void printLocalTime()
+{
+ Serial.println(getStrLocalTime());
+}
 
-String getSeries(String sVar,String sName, HPmeasure arr[],int ile,String sOpt){
-  String prolog,xs,ys,epilog;
-prolog="var "+sVar+" = {\n";
+
+void sendSeries(ESP8266WebServer &svr,String sVar,String sName, HPmeasure arr[],int ile,String sOpt){
+ unsigned long sstart,sstop;
+ String prolog,xs,ys,epilog;
+
+ sstart=millis();
+ prolog="var "+sVar+" = {\n";
+ svr.sendContent(prolog);
+
  xs="x: [";
- ys="y: [";
  for(int x=0;x<ile;x++){
   xs=xs+"'"+(1900+arr[x].year)+"-"+getTm(arr[x].month)+"-"+getTm(arr[x].day)+" "+getTm(arr[x].h)+":"+getTm(arr[x].m)+":"+getTm(arr[x].s)+"',";
+  if ((x % 50)==0) { svr.sendContent(xs); xs=""; }
+ }
+ xs=xs+"],\n";
+ svr.sendContent(xs);
+ xs="";
+
+sstop=millis();
+svr.sendContent("// "+sVar+" x-axis processing time: "+(int)(sstop-sstart)+"\n");
+
+ ys="y: [";
+ for(int x=0;x<ile;x++){
   ys=ys+ (double)arr[x].temp/10+",";
+  if ((x % 50)==0) { svr.sendContent(ys); ys=""; }
  }
- xs=xs+"],\n";
  ys=ys+"],\n";
+ svr.sendContent(ys);
+ ys="";
+ 
 epilog="  type: 'scatter',\n  name: '"+sName+"'"+"\n"+sOpt+"};\n";
-return(prolog+xs+ys+epilog);
+svr.sendContent(epilog);
+sstop=millis();
+svr.sendContent("// "+sVar+" whole processing time: "+(int)(sstop-sstart)+"\n");
+
 }
 
-String getSeries(String sVar,String sName, HPstateRecord arr[],int ile,String sOpt){
+void randomizeSeries(HPmeasure arr[],int ile){
   String prolog,xs,ys,epilog;
-prolog="var "+sVar+" = {\n";
- xs="x: [";
- ys="y: [";
+long licznik,hh,mm,ss;
+licznik=random(340567);
  for(int x=0;x<ile;x++){
-  xs=xs+"'"+(1900+arr[x].year)+"-"+getTm(arr[x].month)+"-"+getTm(arr[x].day)+" "+getTm(arr[x].h)+":"+getTm(arr[x].m)+":"+getTm(arr[x].s)+"',";
-  ys=ys+arr[x].state+",";
+  licznik=licznik+random(100);
+  arr[x].year=2021-1900;
+  arr[x].month=1;
+  arr[x].day=1;
+  ss = licznik % 600;
+  mm = ss % 60;
+  hh = licznik % 60;
+  ss = ss % 60;
+  arr[x].h = hh;
+  arr[x].m = mm;
+  arr[x].s = ss;
+  arr[x].temp = (double) (licznik % 127);
  }
- xs=xs+"],\n";
- ys=ys+"],\n";
-epilog="  type: 'scatter',\n  name: '"+sName+"'"+"\n "+sOpt+"};\n";
-return(prolog+xs+ys+epilog);
-}
-
-String plotlyData(int tr,int br,int rr,int orr,int wr,int ar,int relr){
-
-String wy=""; 
- wy=wy+getSeries("s1","TOP_src",TOPmeasures,tr,"");
- wy=wy+getSeries("s2","BOTTOM_src",BOTTOMmeasures,br,"");
- wy=wy+getSeries("s3","ROOM_temp",ROOMmeasures,rr,"");
- wy=wy+getSeries("s4","OUTSIDE_temp",OUTmeasures,orr,"");
- wy=wy+getSeries("s5","WATER_temp",WATERmeasures,wr,"");
- wy=wy+getSeries("s6","ALARMS",ALMlist,ar,",line: {shape: 'hv'}");
- wy=wy+getSeries("s7","RELAYS",RELlist,relr,",line: {shape: 'hv'}");
- wy=wy+"var layout = { width: 1800,  height: 800 };\n"
-       "var data = [s6,s7,s1,s2,s3,s4,s5];\n"
-       "Plotly.newPlot('plotly1div', data, layout);\n";
-return(wy);
-}
-
-
-String plotlyDataJs(int number,int tr){
-
-String wy;   
-if (number==1) wy=getSeries("s1","TOP_src",TOPmeasures,tr,"");
-if (number==2) wy=getSeries("s2","BOTTOM_src",BOTTOMmeasures,tr,"");
-if (number==3) wy=getSeries("s3","ROOM_temp",ROOMmeasures,tr,"");
-if (number==4) wy=getSeries("s4","OUTSIDE_temp",OUTmeasures,tr,"");
-if (number==5) wy=getSeries("s5","WATER_temp",WATERmeasures,tr,"");
-if (number==6) wy=getSeries("s6","ALARMS",ALMlist,tr,",line: {shape: 'hv'}");
-if (number==7) wy=getSeries("s7","RELAYS",RELlist,tr,",line: {shape: 'hv'}");
-return(wy);
 }
 
 String mainIndexStart(String aWersja,String aPumpStatus){  
@@ -402,9 +435,9 @@ HPmeasure setMeasure(int aTemp,tm aTT){
   return(result); 
 }
 
-HPstateRecord setStateRecord(int aState,tm aTT){
- HPstateRecord result;
-  result.state=aState;
+HPmeasure setStateRecord(int aState,tm aTT){
+ HPmeasure result;
+  result.temp=aState*10;
   result.h=aTT.tm_hour;
   result.m=aTT.tm_min;
   result.s=aTT.tm_sec;
@@ -426,19 +459,26 @@ void setup(void) {
   Serial.begin(19200);
 
 ghp("after com1");
-  
-  Serial2.begin(19200);  
 
-ghp("after com2");
+  randomSeed(12345);
+  
+ghp("after random seed");
+  
+ // Serial2.begin(19200);  
+
+//ghp("after com2");
 
   // reserve 200 bytes for the inputString:
-  inputString.reserve(200);
+  inputString.reserve(100);
 
   licznik=0;
 
   pinMode(LED_PWR, OUTPUT);
   digitalWrite(LED_PWR, LOW);
 
+  pinMode(DIR_PIN, OUTPUT);
+  digitalWrite(DIR_PIN, LOW);// read direction for 74sn176
+  
     Serial.println("\r\n"+WERSJA+"\r\n");
 
   // Configures static IP address
@@ -447,6 +487,7 @@ ghp("after com2");
   }
   
   // Connect to WiFi network
+  WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
 //  Serial.println("");
 
@@ -476,16 +517,17 @@ ghp("after IP");
 
 ghp("after mDNS");
 
- //init and get the time
-//  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+timeClient.begin();
+timeClient.update();
 
 ghp("after time config");
 
-   delay(1500);
+ //  delay(1500);
 
   printLocalTime();
 
 ghp("after print local time");
+
 
   // get data few times because controller sends requests in different frequency per message type
   // we need here to ensure we have all types stored already
@@ -501,14 +543,14 @@ ghp("after print local time");
     server.setContentLength(CONTENT_LENGTH_UNKNOWN); //to force "chunked"
     //server.sendHeader("Connection", "close");
     server.send(200, "text/html", mainIndexStart(WERSJA,pumpStatus));
-
-        server.sendContent(plotlyDataJs(1,wrptrTOP));
-        server.sendContent(plotlyDataJs(2,wrptrBOTTOM));
-        server.sendContent(plotlyDataJs(3,wrptrROOM));
-        server.sendContent(plotlyDataJs(4,wrptrOUT));
-        server.sendContent(plotlyDataJs(5,wrptrWATER));
-        server.sendContent(plotlyDataJs(6,wrptrALM));
-        server.sendContent(plotlyDataJs(7,wrptrREL));      
+    // opening scropt tag is sent by mainIndexStart
+    sendSeries(server,"s1","TOP_src",TOPmeasures,wrptrTOP,"");
+    sendSeries(server,"s2","BOTTOM_src",BOTTOMmeasures,wrptrBOTTOM,"");
+    sendSeries(server,"s3","ROOM_temp",ROOMmeasures,wrptrROOM,"");
+    sendSeries(server,"s4","OUTSIDE_temp",OUTmeasures,wrptrOUT,"");
+    sendSeries(server,"s5","WATER_temp",WATERmeasures,wrptrWATER,"");
+    sendSeries(server,"s6","ALARMS",ALMlist,wrptrALM,",line: {shape: 'hv'}");
+    sendSeries(server,"s7","RELAYS",RELlist,wrptrREL,",line: {shape: 'hv'}");
   
  // rest of page
  server.sendContent(" var layout = { width: 1800,  height: 800 };\n"
@@ -552,14 +594,15 @@ ghp("after print local time");
         String tmp =server.arg("s");
         int num=tmp.toInt();
         String wy;
-        if (num==1) wy=plotlyDataJs(1,wrptrTOP);
-        if (num==2) wy=plotlyDataJs(2,wrptrBOTTOM);
-        if (num==3) wy=plotlyDataJs(3,wrptrROOM);
-        if (num==4) wy=plotlyDataJs(4,wrptrOUT);
-        if (num==5) wy=plotlyDataJs(5,wrptrWATER);
-        if (num==6) wy=plotlyDataJs(6,wrptrALM);
-        if (num==7) wy=plotlyDataJs(7,wrptrREL);      
-        server.send(200, "text/html", wy);       
+        server.send(200, "text/html", "");       
+
+        if (num==1) sendSeries(server,"s1","TOP_src",TOPmeasures,wrptrTOP,"");
+        if (num==2) sendSeries(server,"s2","BOTTOM_src",BOTTOMmeasures,wrptrBOTTOM,"");
+        if (num==3) sendSeries(server,"s3","ROOM_temp",ROOMmeasures,wrptrROOM,"");
+        if (num==4) sendSeries(server,"s4","OUTSIDE_temp",OUTmeasures,wrptrOUT,"");
+        if (num==5) sendSeries(server,"s5","WATER_temp",WATERmeasures,wrptrWATER,"");
+        if (num==6) sendSeries(server,"s6","ALARMS",ALMlist,wrptrALM,",line: {shape: 'hv'}");
+        if (num==7) sendSeries(server,"s7","RELAYS",RELlist,wrptrREL,",line: {shape: 'hv'}");        
      }   
   });
 
@@ -578,6 +621,31 @@ ghp("after print local time");
         wrptrALM=num;
         server.send(200, "text/html", "<html><head/><body>Pointers set to:"+tmp+" <a href='/serverIndex'>go back</a></body></html>");      
      }   
+  });
+
+  server.on("/randomize", HTTP_GET, []() {
+     //server.sendHeader("Connection", "close");
+
+
+    randomizeSeries(TOPmeasures,wrptrTOP);
+//        server.sendContent("1<br/>");      
+    randomizeSeries(BOTTOMmeasures,wrptrBOTTOM);
+//        server.sendContent("2<br/>");      
+    randomizeSeries(ROOMmeasures,wrptrROOM);
+//        server.sendContent("3<br/>");      
+    randomizeSeries(OUTmeasures,wrptrOUT);
+//        server.sendContent("4<br/>");      
+    randomizeSeries(WATERmeasures,wrptrWATER);
+//        server.sendContent("5<br/>");      
+    randomizeSeries(ALMlist,wrptrALM);
+//        server.sendContent("6<br/>");      
+    randomizeSeries(RELlist,wrptrREL);
+//        server.sendContent("7<br/>");      
+
+        server.send(200, "text/html", "<html><head/><body>Randomizing.....<br>");      
+
+        server.sendContent("Randomized! <br/><a href='/serverIndex'>go back</a></body></html>");      
+        
   });
 
   /*handling uploading firmware file */
@@ -606,7 +674,7 @@ ghp("after print local time");
     }
   });
 
-
+/*
   hasIoTHub = false;
   if (Esp32MQTTClient_Init((const uint8_t*)connectionString))
   {
@@ -617,6 +685,7 @@ ghp("after print local time");
   }
 
 ghp("after mqtt init");
+ */
   
   server.begin();
 
@@ -663,21 +732,8 @@ int safeInc(int we,int boundary,HPmeasure aTab[]){
    }
 }
 
-int safeInc(int we,int boundary,HPstateRecord aTab[]){
-  we++;
-  if (we<boundary) {
-    return(we);
-   } else { 
-    int x=0;
-    int y=boundary-1;
-    while (x<y){   //shift left whole array
-      aTab[x]=aTab[++x];
-    }
-    return(y);
-   }
-}
 
-
+/*
 EVENT_INSTANCE *Esp32MQTTClient_Message_Generate(const char *eventString )
 {
   
@@ -710,7 +766,7 @@ EVENT_INSTANCE *Esp32MQTTClient_Message_Generate(const char *eventString )
     return event;
 }
 
-
+*/
 
 /*
  *  =========== L O O P ==============
@@ -744,7 +800,8 @@ if (licznikpwr==500){
  if (curTime!=lastTime) { // each second
   lastTime=curTime;
 
- // MQTT nadling
+/*
+ // MQTT hadling
   if (hasIoTHub && TT.tm_sec==0) // every minute
   {
     char buff[128]; //128 is enough for our dataset
@@ -760,7 +817,7 @@ if (licznikpwr==500){
     }
   }
 
-
+*/
    int inoutInterval     = INOUT_INTERVAL;
    int topbottomInterval = TOPBOTTOM_INTERVAL;
    int waterInterval     = WATER_INTERVAL;
@@ -865,9 +922,9 @@ unsigned long Str2Hex(String we){
 }
 
 void getSerialData() {
-  while (Serial2.available()) {
+  while (Serial.available()) {
     // get the new byte:
-    char inChar = (char)Serial2.read();
+    char inChar = (char)Serial.read();
     if (inChar == ':') {
        inputString = "";
        cmdlen=0;          
@@ -916,11 +973,11 @@ void getSerialData() {
                 statAlarms = 7-Str2Hex(inputString.substring(5));
                 hpmCurrentALM =setStateRecord(statAlarms,TT);
                 inputString="";
-                break;
-                
+                break;               
         }
                
         pumpStatus = inputString          //intentional - for any unparsed command to be shown
+        +"H:"+ESP.getFreeHeap()   // how its heap going?
         +" ROOM="+(double)statInTemp/10
         +" OUTSIDE="+(double)statOutTemp/10
         +" BOTTOM="+(double)statDzTemp/10
