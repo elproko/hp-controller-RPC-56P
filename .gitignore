@@ -1,0 +1,6 @@
+
+# Ignore `bin` files
+*.bin
+
+# ignore wifi settings
+wifi_settings.h
