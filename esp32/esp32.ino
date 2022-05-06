@@ -7,6 +7,28 @@
 // Please set proper WIFI settings first !
 #include "wifi_settings.h"
 
+//needed for SNTP & MQTT
+static const char* ntpServer = "pool.ntp.org";
+static const long  gmtOffset_sec = 3600;
+static const int   daylightOffset_sec = 3600;
+
+
+/*String containing Hostname, Device Id & Device Key in the format:                         */
+/*  "HostName=<host_name>;DeviceId=<device_id>;SharedAccessKey=<device_key>"                */
+/*  "HostName=<host_name>;DeviceId=<device_id>;SharedAccessSignature=<device_sas_token>"    */
+//static const char* connectionString = ""; // conection string
+
+static bool hasIoTHub = false;
+
+#include "Esp32MQTTClient.h"
+
+// Warning:
+// C:\Users\<user>\AppData\Local\Arduino15\packages\esp32\hardware\esp32\1.0.4\libraries\AzureIoT\src\az_iot\c-utility\pal\lwip\sntp_lwip.c 
+// The file from path above needs to be patched according to info from:
+// https://github.com/VSChina/ESP32_AzureIoT_Arduino/issues/18
+
+
+
 #define LED_PWR 22
 
 #define LED_PIN1 17
@@ -55,9 +77,6 @@ struct HPstateRecord{     //alarms & relays
 
 unsigned long tdiff=0;
 
-const char* ntpServer = "pool.ntp.org";
-const long  gmtOffset_sec = 3600;
-const int   daylightOffset_sec = 3600;
 
 IPAddress local_IP(192, 168, 1, 45);
 IPAddress gateway(192, 168, 1, 3);
@@ -80,7 +99,7 @@ String pumpStatus = "";
 String inputString = "";         // a String to hold incoming data
 
 String lastTime="";
-int lastSecWater=13000;
+int lastSecWater=13000;  //13000 is the longest time than longest interval we have
 int lastSecInOut=13000;
 int lastSecTopBottom=13000;
 
@@ -133,7 +152,7 @@ struct tm TT;
 WebServer server(80);
 
 
-const String WERSJA = "Pompka w Zielistkach v0.57";
+const String WERSJA = "Pompka w Zielistkach v0.591";
 
 const String JSINCLUDE =
 "\n  <!-- Plotly.js -->"
@@ -213,7 +232,7 @@ return(prolog+xs+ys+epilog);
 
 String plotlyData(int tr,int br,int rr,int orr,int wr,int ar,int relr){
 
-String wy="\n<script>\n";   
+String wy=""; 
  wy=wy+getSeries("s1","TOP_src",TOPmeasures,tr,"");
  wy=wy+getSeries("s2","BOTTOM_src",BOTTOMmeasures,br,"");
  wy=wy+getSeries("s3","ROOM_temp",ROOMmeasures,rr,"");
@@ -223,29 +242,26 @@ String wy="\n<script>\n";
  wy=wy+getSeries("s7","RELAYS",RELlist,relr,",line: {shape: 'hv'}");
  wy=wy+"var layout = { width: 1800,  height: 800 };\n"
        "var data = [s6,s7,s1,s2,s3,s4,s5];\n"
-       "Plotly.newPlot('plotly1div', data, layout);\n</script>\n";
+       "Plotly.newPlot('plotly1div', data, layout);\n";
 return(wy);
 }
 
 
 String plotlyDataJs(int number,int tr){
 
-String wy="";   
- wy=wy+getSeries("s1","TOP_src",TOPmeasures,tr,"");
- wy=wy+getSeries("s2","BOTTOM_src",BOTTOMmeasures,tr,"");
- wy=wy+getSeries("s3","ROOM_temp",ROOMmeasures,tr,"");
- wy=wy+getSeries("s4","OUTSIDE_temp",OUTmeasures,tr,"");
- wy=wy+getSeries("s5","WATER_temp",WATERmeasures,tr,"");
- wy=wy+getSeries("s6","ALARMS",ALMlist,tr,",line: {shape: 'hv'}");
- wy=wy+getSeries("s7","RELAYS",RELlist,tr,",line: {shape: 'hv'}");
- wy=wy+"\n<script>\n var layout = { width: 1800,  height: 800 };\n"
-       " var data = [s6,s7,s1,s2,s3,s4,s5];\n"
-       "Plotly.newPlot('plotly1div', data, layout);\n</script>\n";
+String wy;   
+if (number==1) wy=getSeries("s1","TOP_src",TOPmeasures,tr,"");
+if (number==2) wy=getSeries("s2","BOTTOM_src",BOTTOMmeasures,tr,"");
+if (number==3) wy=getSeries("s3","ROOM_temp",ROOMmeasures,tr,"");
+if (number==4) wy=getSeries("s4","OUTSIDE_temp",OUTmeasures,tr,"");
+if (number==5) wy=getSeries("s5","WATER_temp",WATERmeasures,tr,"");
+if (number==6) wy=getSeries("s6","ALARMS",ALMlist,tr,",line: {shape: 'hv'}");
+if (number==7) wy=getSeries("s7","RELAYS",RELlist,tr,",line: {shape: 'hv'}");
 return(wy);
 }
 
-String onoffIndex(String aWersja,String aPumpStatus){  
-String wy="<html lang='pl' dir='ltr'>"
+String mainIndexStart(String aWersja,String aPumpStatus){  
+ String wy="<html lang='pl' dir='ltr'>"
  "<head><meta charset='utf-8'>"
  +JSINCLUDE+
  "</head>"
@@ -254,31 +270,20 @@ String wy="<html lang='pl' dir='ltr'>"
         "<tr>"
             "<td colspan=4>"
                 "<center><b>"+aWersja+" "+getStrLocalTime()+"</b></center>"              
-                "<center>Status: "+aPumpStatus+"</center>"                               
+                "<center>"+aPumpStatus+"</center>"                               
                 "<center><a href='/login'>login</a></center>"                
             "</td>"                    
         "</tr>"
-      /*  "<tr>"
-        "<td>Klatka schodowa:</td>"
-        "<td><a href='/on1'>włącz</a></td>"
-        "<td><a href='/off1'>wyłącz</a></td>"
-        "<td><a href='/blink1'>migaj</a><br></td>"
-        "</tr>" 
-        "<tr><td colspan=4>&nbsp;</td></tr>"    */  
     "</table>"
-"<div id='plotly1div'><!-- Plotly chart will be drawn inside this DIV --></div>"
-+plotlyData(wrptrTOP,wrptrBOTTOM,wrptrROOM,wrptrOUT,wrptrWATER,wrptrALM,wrptrREL)+
- "</body>"
- "</html>";
+"<div id='plotly1div'><!-- Plotly chart will be drawn inside this DIV --></div>\n<script>\n";
  return(wy);
 }
 
 /*
  * Login page
  */
-
-const String loginIndex = 
- "<html lang='pl' dir='ltr'>"
+String loginIndex(String aWersja){ 
+ return("<html lang='pl' dir='ltr'>"
  "<head><meta charset='utf-8'>"
  +JSINCLUDE+
  "</head>"
@@ -287,7 +292,7 @@ const String loginIndex =
     "<table width='50%' bgcolor='A09F9F' align='center' style='font-size:2em;'>"
         "<tr>"
             "<td colspan=2>"
-                "<center><b>"+WERSJA+" Logowanie "+getStrLocalTime()+"</b></center>"
+                "<center><b>"+aWersja+" Logowanie "+getStrLocalTime()+"</b></center>"
                 "<br>"
             "</td>"          
             "<br>"
@@ -295,8 +300,7 @@ const String loginIndex =
         "<td>Username:</td>"
         "<td><input type='text' size=25 name='userid'><br></td>"
         "</tr>"
-        "<br>"
-        "<br>"
+       "<br>"
         "<tr>"
             "<td>Password:</td>"
             "<td><input type='Password' size=25 name='pwd'><br></td>"
@@ -309,7 +313,8 @@ const String loginIndex =
     "</table>"
 "</form>"
  "</body>"
- "</html>";
+ "</html>");
+} 
  
 /*
  * Server Index Page
@@ -409,14 +414,22 @@ HPstateRecord setStateRecord(int aState,tm aTT){
   return(result); 
 }
 
+void ghp(String co){
+Serial.println(co);
+Serial.println(ESP.getFreeHeap());  
+}
+
 /*
  * setup function
  */
 void setup(void) {
-
- 
   Serial.begin(19200);
+
+ghp("after com1");
+  
   Serial2.begin(19200);  
+
+ghp("after com2");
 
   // reserve 200 bytes for the inputString:
   inputString.reserve(200);
@@ -437,6 +450,8 @@ void setup(void) {
   WiFi.begin(ssid, password);
 //  Serial.println("");
 
+ghp("after wifi begin");
+
   // Wait for connection
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
@@ -448,7 +463,9 @@ void setup(void) {
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
 
-  /*use mdns for host name resolution*/
+ghp("after IP");
+
+  // use mdns for host name resolution
   if (!MDNS.begin(host)) { //http://esp32.local
     Serial.println("Error setting up MDNS responder!");
     while (1) {
@@ -457,11 +474,21 @@ void setup(void) {
   }
   Serial.println("mDNS responder started");
 
+ghp("after mDNS");
+
  //init and get the time
-  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+//  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+
+ghp("after time config");
+
+   delay(1500);
 
   printLocalTime();
 
+ghp("after print local time");
+
+  // get data few times because controller sends requests in different frequency per message type
+  // we need here to ensure we have all types stored already
   getSerialData();
   getSerialData();
   getSerialData();
@@ -471,35 +498,37 @@ void setup(void) {
   
   /*return index page which is stored in serverIndex */
   server.on("/", HTTP_GET, []() {
-    server.sendHeader("Connection", "close");
-    server.send(200, "text/html", onoffIndex(WERSJA,pumpStatus));
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN); //to force "chunked"
+    //server.sendHeader("Connection", "close");
+    server.send(200, "text/html", mainIndexStart(WERSJA,pumpStatus));
+
+        server.sendContent(plotlyDataJs(1,wrptrTOP));
+        server.sendContent(plotlyDataJs(2,wrptrBOTTOM));
+        server.sendContent(plotlyDataJs(3,wrptrROOM));
+        server.sendContent(plotlyDataJs(4,wrptrOUT));
+        server.sendContent(plotlyDataJs(5,wrptrWATER));
+        server.sendContent(plotlyDataJs(6,wrptrALM));
+        server.sendContent(plotlyDataJs(7,wrptrREL));      
+  
+ // rest of page
+ server.sendContent(" var layout = { width: 1800,  height: 800 };\n"
+ " var data = [s6,s7,s1,s2,s3,s4,s5];\n"
+ "Plotly.newPlot('plotly1div', data, layout);\n</script>\n"
+ "</script></body>"
+ "</html>");
+  
   });
 
   server.on("/test.svg", drawGraph);
 
   server.on("/login", HTTP_GET, []() {
-    server.sendHeader("Connection", "close");
-    server.send(200, "text/html", loginIndex);
+    //server.sendHeader("Connection", "close");
+    server.send(200, "text/html", loginIndex(WERSJA));
   });
 
   server.on("/serverIndex", HTTP_GET, []() {
-    server.sendHeader("Connection", "close");
+    //server.sendHeader("Connection", "close");
     server.send(200, "text/html", serverIndex(WERSJA,pumpStatus));
-  });
-
-  server.on("/onoff", HTTP_GET, []() {
-    server.sendHeader("Connection", "close");
-    server.send(200, "text/html", onoffIndex(WERSJA,pumpStatus));
-  });
-
-
-  server.on("/off1", HTTP_GET, []() {
-    digitalWrite(LED_PIN1, HIGH);
-//    server.sendHeader("Connection", "close");
-    int ttmp=licznik;
-    String stmp=onoffIndex(WERSJA,pumpStatus+" "+tdiff);
-    tdiff=abs(licznik-ttmp);
-    server.send(200, "text/html", stmp);
   });
 
 /*
@@ -511,15 +540,44 @@ void setup(void) {
 
 
   server.on("/restart", HTTP_GET, []() {
-    server.sendHeader("Connection", "close");
+    //server.sendHeader("Connection", "close");
     server.send(200, "text/html", "<html><head/><body>Restart... <a href='/serverIndex'>go back</a></body></html>");
     delay(100);
     ESP.restart();
   });
 
-  server.on("/data", HTTP_GET, []() {
-     server.sendHeader("Connection", "close");
-     sendArrayData();
+  server.on("/data.js", HTTP_GET, []() {
+     //server.sendHeader("Connection", "close");
+     if (server.hasArg("s") ){
+        String tmp =server.arg("s");
+        int num=tmp.toInt();
+        String wy;
+        if (num==1) wy=plotlyDataJs(1,wrptrTOP);
+        if (num==2) wy=plotlyDataJs(2,wrptrBOTTOM);
+        if (num==3) wy=plotlyDataJs(3,wrptrROOM);
+        if (num==4) wy=plotlyDataJs(4,wrptrOUT);
+        if (num==5) wy=plotlyDataJs(5,wrptrWATER);
+        if (num==6) wy=plotlyDataJs(6,wrptrALM);
+        if (num==7) wy=plotlyDataJs(7,wrptrREL);      
+        server.send(200, "text/html", wy);       
+     }   
+  });
+
+
+  server.on("/setptr", HTTP_GET, []() {
+     //server.sendHeader("Connection", "close");
+     if (server.hasArg("s") ){
+        String tmp=server.arg("s");
+        int num=tmp.toInt();
+        wrptrBOTTOM=num;
+        wrptrTOP=num;
+        wrptrOUT=num;
+        wrptrROOM=num;
+        wrptrWATER=num;
+        wrptrREL=num;
+        wrptrALM=num;
+        server.send(200, "text/html", "<html><head/><body>Pointers set to:"+tmp+" <a href='/serverIndex'>go back</a></body></html>");      
+     }   
   });
 
   /*handling uploading firmware file */
@@ -547,7 +605,23 @@ void setup(void) {
       }
     }
   });
+
+
+  hasIoTHub = false;
+  if (Esp32MQTTClient_Init((const uint8_t*)connectionString))
+  {
+    hasIoTHub = true;
+    Serial.println("IoT hub Initialized.");
+  }  else  {
+    Serial.println("Error during IoT hub Init...");  
+  }
+
+ghp("after mqtt init");
+  
   server.begin();
+
+ghp("after http start");
+  
 }
 
 
@@ -567,11 +641,6 @@ void drawGraph() {
   out += "</g>\n</svg>\n";
 
   server.send(200, "image/svg+xml", out);
-}
-
-void sendArrayData() {
-  String out = plotlyData(MAXTAB,MAXTAB,MAXTAB,MAXTAB,MAXTAB,MAXTAB,MAXTAB);
-  server.send(200, "text/plain", out);
 }
 
 
@@ -608,6 +677,45 @@ int safeInc(int we,int boundary,HPstateRecord aTab[]){
    }
 }
 
+
+EVENT_INSTANCE *Esp32MQTTClient_Message_Generate(const char *eventString )
+{
+  
+    EVENT_TYPE type = MESSAGE;
+    if (eventString == NULL)
+    {
+        return NULL;
+    }
+
+    EVENT_INSTANCE *event = (EVENT_INSTANCE *)malloc(sizeof(EVENT_INSTANCE));
+    event->type = type;
+
+    if (type == MESSAGE)
+    {
+        event->messageHandle = IoTHubMessage_CreateFromString(eventString);
+                        (void)IoTHubMessage_SetContentTypeSystemProperty(event->messageHandle, "application%2fjson");
+                (void)IoTHubMessage_SetContentEncodingSystemProperty(event->messageHandle, "utf-8");
+        if (event->messageHandle == NULL)
+        {
+            LogError("iotHubMessageHandle is NULL!");
+            free(event);
+            return NULL;
+        }
+    }
+    else if (type == STATE)
+    {
+        event->stateString = eventString;
+    }
+
+    return event;
+}
+
+
+
+/*
+ *  =========== L O O P ==============
+ */
+ 
 void loop(void) {
   getSerialData();
   server.handleClient();
@@ -633,8 +741,25 @@ if (licznikpwr==500){
 
  curTime=getStrLocalTime(); //here TT global struct is filled in
 
- if (curTime!=lastTime) {
+ if (curTime!=lastTime) { // each second
   lastTime=curTime;
+
+ // MQTT nadling
+  if (hasIoTHub && TT.tm_sec==0) // every minute
+  {
+    char buff[128]; //128 is enough for our dataset
+    snprintf(buff, 128, "{\"TempTOP\":%.1f,\"TempBOTTOM\":%.1f,\"TempROOM\":%.1f,\"TempOUTSIDE\":%.1f,\"TempWATER\":%.1f,\"TempALARMS\":%i,\"TempRELAYS\":%i}" ,
+    (double)statGzTemp/10,(double)statDzTemp/10,(double)statInTemp/10,(double)statOutTemp/10,(double)statCwuTemp/10,statAlarms,statRelays);
+    EVENT_INSTANCE* message = Esp32MQTTClient_Message_Generate(buff);      
+    if (Esp32MQTTClient_SendEventInstance(message))
+    {
+      Serial.println("Data sent:");
+      Serial.println(buff);
+    } else {
+      Serial.println("MQTT err...");
+    }
+  }
+
 
    int inoutInterval     = INOUT_INTERVAL;
    int topbottomInterval = TOPBOTTOM_INTERVAL;
@@ -668,8 +793,6 @@ if (toinc==1){
        wrptrALM=safeInc(wrptrALM,MAXTAB,ALMlist);         
 }
 
-
-
   if (abs((TT.tm_min*60+TT.tm_sec)-lastSecWater)>=waterInterval) { //getStrLocalTime() sets the global TT.tm_sec 
        lastSecWater=TT.tm_min*60+TT.tm_sec;
 
@@ -696,6 +819,17 @@ if (toinc==1){
 
        OUTmeasures[wrptrOUT]=hpmCurrentOUT;
        wrptrOUT=safeInc(wrptrOUT,MAXTAB,OUTmeasures);   
+
+  if (toinc==0){
+      // save saamplepoint also for alarms & relays, but only when the samplepoint was NOT triggered by Alarms nor Relays
+
+       RELlist[wrptrREL]=hpmCurrentREL;        
+       wrptrREL=safeInc(wrptrREL,MAXTAB,RELlist);   
+
+       ALMlist[wrptrALM]=hpmCurrentALM;       
+       wrptrALM=safeInc(wrptrALM,MAXTAB,ALMlist);         
+
+  }
 
        //check connection...
        if (WiFi.status() != WL_CONNECTED) {
@@ -786,7 +920,7 @@ void getSerialData() {
                 
         }
                
-        pumpStatus = inputString
+        pumpStatus = inputString          //intentional - for any unparsed command to be shown
         +" ROOM="+(double)statInTemp/10
         +" OUTSIDE="+(double)statOutTemp/10
         +" BOTTOM="+(double)statDzTemp/10
