@@ -12,3 +12,7 @@ Second stage is esp32 microcontroller based approach. Aim was to store atleast 4
 Third stage was esp8266 (esp12) port
 
 Last stage is translate all this thing to ESPHome (and Home Assistant)
+
+Since Home Assistant and ESPHome decided to drop support for custom components in favour of external components - new repo was created to fullfill compatibility with 2025.03 Home Assistant / ESPHome versions.
+
+Please treat this repo for ESPHome as deprecated and use this new repo: https://github.com/elproko/esphome_rpc56p
